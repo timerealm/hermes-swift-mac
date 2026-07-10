@@ -206,15 +206,16 @@ final class AppearanceThresholdTests: XCTestCase {
 
 /// Tests for the /api/* navigation guard (issue #76).
 /// Mirrors the path-prefix check in BrowserWindowController.webView(_:decidePolicyFor:).
-/// API endpoints should never become full-page navigations — the WebUI's JS
-/// treats them as fetch targets only, and JSON error responses would render
-/// raw if a navigation slipped through.
+/// Ordinary API endpoints should never become full-page navigations, while
+/// Hermes artifact endpoints must remain reachable so WKWebView can turn an
+/// attachment response into a native download.
 final class APINavigationGuardTests: XCTestCase {
-
     // Mirrors BrowserWindowController.webView(_:decidePolicyFor:) check
-    func shouldCancelAsAPINav(_ urlString: String) -> Bool {
+    func shouldCancelAsAPINav(_ urlString: String, shouldPerformDownload: Bool = false) -> Bool {
         guard let url = URL(string: urlString) else { return false }
-        return url.path.hasPrefix("/api/")
+        if shouldPerformDownload { return false }
+        let downloadAPIPaths = ["/api/media", "/api/file/raw", "/api/folder/download"]
+        return url.path.hasPrefix("/api/") && !downloadAPIPaths.contains(url.path)
     }
 
     func testApiPathsAreCancelled() {
@@ -222,6 +223,16 @@ final class APINavigationGuardTests: XCTestCase {
         XCTAssertTrue(shouldCancelAsAPINav("http://localhost:8787/api/updates/apply"))
         XCTAssertTrue(shouldCancelAsAPINav("http://localhost:8787/api/chat/stream"))
         XCTAssertTrue(shouldCancelAsAPINav("https://my-server.example.com/api/anything"))
+    }
+
+    func testArtifactDownloadsAreNotCancelled() {
+        XCTAssertFalse(shouldCancelAsAPINav("http://localhost:8787/api/media"))
+        XCTAssertFalse(shouldCancelAsAPINav("http://localhost:8787/api/file/raw"))
+        XCTAssertFalse(shouldCancelAsAPINav("http://localhost:8787/api/folder/download"))
+        XCTAssertFalse(shouldCancelAsAPINav(
+            "http://localhost:8787/api/anything",
+            shouldPerformDownload: true
+        ))
     }
 
     func testNonApiPathsAreAllowed() {

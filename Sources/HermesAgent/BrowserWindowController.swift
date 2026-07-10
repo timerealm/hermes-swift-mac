@@ -1162,6 +1162,10 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         download.delegate = self
     }
 
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
     // MARK: - File upload
 
     func webView(
@@ -1193,6 +1197,15 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
             return
         }
 
+        // An HTML download attribute becomes a navigation action before a
+        // response is available. Handle it before the generic API guard below;
+        // Hermes WebUI artifact links use /api/media and would otherwise be
+        // cancelled before WKWebView can create a WKDownload.
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(.download)
+            return
+        }
+
         // Defense-in-depth (#76): API endpoints should never become full-page
         // navigations. The WebUI's JS treats /api/* as fetch targets only, and
         // every API error response uses the JSON shape `{"error": "..."}` —
@@ -1204,8 +1217,11 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         // chance to retry the action. Companion WebUI-side fix at
         // nesquena/hermes-webui#1835 locks down the home route to never
         // return JSON; this Mac-side guard catches every other class of
-        // accidental API navigation regardless of WebUI state.
-        if url.path.hasPrefix("/api/") {
+        // accidental API navigation regardless of WebUI state. The explicit
+        // artifact endpoints remain eligible for response-time download
+        // detection via Content-Disposition.
+        let downloadAPIPaths = ["/api/media", "/api/file/raw", "/api/folder/download"]
+        if url.path.hasPrefix("/api/") && !downloadAPIPaths.contains(url.path) {
             decisionHandler(.cancel)
             return
         }
