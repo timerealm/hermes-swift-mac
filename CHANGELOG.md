@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.7.2] — 2026-07-11
 
 ### Fixed
 - **Artifact downloads work in the desktop client — PR #90** — clicking a `📎` artifact link (`<a download href="api/media?...">`) did nothing: the `/api/*` navigation guard cancelled the request before WKWebView could turn it into a download. Action-initiated downloads (`shouldPerformDownload`) are now routed to `WKDownload` ahead of the API guard, the `WKDownloadDelegate` is attached for action-initiated downloads too, and the explicit artifact endpoints (`/api/media`, `/api/file/raw`, `/api/folder/download`) stay eligible for response-time `Content-Disposition` download detection. Ordinary API navigations remain blocked. Contributed by @maxon1233.
