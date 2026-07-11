@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- **Artifact downloads work in the desktop client — PR #90** — clicking a `📎` artifact link (`<a download href="api/media?...">`) did nothing: the `/api/*` navigation guard cancelled the request before WKWebView could turn it into a download. Action-initiated downloads (`shouldPerformDownload`) are now routed to `WKDownload` ahead of the API guard, the `WKDownloadDelegate` is attached for action-initiated downloads too, and the explicit artifact endpoints (`/api/media`, `/api/file/raw`, `/api/folder/download`) stay eligible for response-time `Content-Disposition` download detection. Ordinary API navigations remain blocked. Contributed by @maxon1233.
+- **Dock icon no longer oversized — issue #83** — the app-icon artwork was full-bleed on its canvas, but macOS expects the icon square inset within a transparent margin (~10% per side, the 824/1024 grid). The Dock rendered it visibly larger than every neighbouring icon. The master `Hermes Icon.png` artwork is now inset on a transparent canvas; both `build.sh` and CI consume the same file, so local and release builds get the corrected icon. Reporter: @n1c0la84.
 - **SSH mode no longer bypasses the tunnel** — the browser loaded the raw Target URL instead of the tunnel entrance, so the `ssh -L` forward came up but carried no traffic (`netstat` showed a direct connection to the remote host). `AppDelegate.effectiveTargetURL()` now returns `http://127.0.0.1:<local port>` in SSH mode and the Target URL in Direct mode, applied to launch/reconnect, new windows/tabs, and View → Open in Browser.
 - **Direct mode works with non-localhost URLs (Tailscale/LAN hosts)** — a Target URL like `http://my-box.ts.net:8787` failed with "Cannot connect" even when the server was up: the WKWebView is ATS-exempt (`NSAllowsArbitraryLoadsInWebContent`) but the URLSession preflight, Test Connection, and health ping were not, so ATS rejected their plain-http requests to non-loopback hosts with -1022. All three now use `ReachabilityProbe`, which speaks HTTP over Network.framework (not subject to ATS).
 
@@ -14,6 +16,12 @@
 
 ### Security
 - SSH username/host fields reject values that could smuggle ssh options (leading `-`, whitespace), enforced at Save, Test Connection, and in `testAuth`/`testForward`. The health probe builds its request from the percent-encoded URL path so encoded CR/LF can't reshape the request.
+- The download fast-path added for artifact links excludes `file://` URLs — a download-attributed `file://` link falls through to the scheme guard that cancels all `file://` navigation, so it can never become a `WKDownload` of a local file. `blob:`/`data:` stay eligible (page-authored content).
+
+## [v1.7.1] — 2026-06-28
+
+### Changed
+- **New cyan caduceus app icon — PR #84** — brand refresh of the app icon. (Retroactive entry; the release shipped without a CHANGELOG update.)
 
 ## [v1.7.0] — 2026-05-07
 
