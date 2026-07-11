@@ -12,6 +12,9 @@ class PreferencesWindowController: NSWindowController {
     private var localPortField: NSTextField!
     private var remotePortField: NSTextField!
     private var targetURLField: NSTextField!
+    /// Replaces the Target URL field in SSH mode, where the URL is derived
+    /// from the local port (the tunnel entrance) rather than typed.
+    private var tunnelURLLabel: NSTextField!
     private var testResultLabel: NSTextField!
     private var launchAtLoginCheckbox: NSButton!
     private var notificationsCheckbox: NSButton!
@@ -89,16 +92,18 @@ class PreferencesWindowController: NSWindowController {
             return line
         }
 
-        // Connection Mode
-        _ = sectionHeader("CONNECTION MODE")
-        let modeLabel = NSTextField(labelWithString: "Mode")
+        // Tunnel mechanism. "None" = the Target URL is reachable as-is;
+        // "SSH" = a forward is established first and the app loads the
+        // tunnel entrance. Persisted values are "direct"/"ssh".
+        _ = sectionHeader("TUNNEL")
+        let modeLabel = NSTextField(labelWithString: "Tunnel")
         modeLabel.font = NSFont.systemFont(ofSize: 13)
         modeLabel.frame = NSRect(x: 24, y: y, width: 130, height: 22)
         modeLabel.alignment = .right
         content.addSubview(modeLabel)
 
         connectionModeSegment = NSSegmentedControl(
-            labels: ["Direct (Local)", "SSH Tunnel"], trackingMode: .selectOne, target: self,
+            labels: ["None", "SSH"], trackingMode: .selectOne, target: self,
             action: #selector(modeChanged))
         connectionModeSegment.frame = NSRect(x: 164, y: y - 2, width: 300, height: 22)
         let mode = UserDefaults.standard.string(forKey: "connectionMode") ?? "direct"
@@ -109,15 +114,13 @@ class PreferencesWindowController: NSWindowController {
         let divider1 = divider()
         sshViews.append(divider1)
 
-        // SSH Connection section (shown only in SSH mode)
+        // SSH section — always visible; dimmed/disabled when tunnel is None
+        // so the fixed-frame layout keeps its shape.
         let sshHeader = sectionHeader("SSH CONNECTION")
         sshViews.append(sshHeader)
-        sshHeader.isHidden = mode == "direct"
 
         usernameField = row("Username", placeholder: "hermes", defaultsKey: "sshUser", isSSH: true)
-        usernameField.isHidden = mode == "direct"
         hostField = row("Host", placeholder: "your-server.com", defaultsKey: "sshHost", isSSH: true)
-        hostField.isHidden = mode == "direct"
 
         let divider2 = divider()
         sshViews.append(divider2)
@@ -125,14 +128,11 @@ class PreferencesWindowController: NSWindowController {
         // Port forwarding section
         let portHeader = sectionHeader("PORT FORWARDING")
         sshViews.append(portHeader)
-        portHeader.isHidden = mode == "direct"
 
         localPortField = row(
             "Local port", placeholder: "8787", defaultsKey: "localPort", width: 80, isSSH: true)
-        localPortField.isHidden = mode == "direct"
         remotePortField = row(
             "Remote port", placeholder: "8787", defaultsKey: "remotePort", width: 80, isSSH: true)
-        remotePortField.isHidden = mode == "direct"
 
         _ = divider()
 
@@ -140,6 +140,18 @@ class PreferencesWindowController: NSWindowController {
         _ = sectionHeader("APP")
         targetURLField = row(
             "Target URL", placeholder: "http://localhost:8787", defaultsKey: "targetURL")
+        // In SSH mode the URL is derived from the local port; a read-only
+        // label can't silently disagree with the tunnel the way an editable
+        // field could.
+        tunnelURLLabel = NSTextField(labelWithString: "")
+        tunnelURLLabel.font = NSFont.systemFont(ofSize: 13)
+        tunnelURLLabel.textColor = .secondaryLabelColor
+        tunnelURLLabel.frame = targetURLField.frame
+        content.addSubview(tunnelURLLabel)
+        // Delegate on every connection field: edits clear a stale Test
+        // Connection result; the local port also drives the tunnel-URL label.
+        [usernameField, hostField, localPortField, remotePortField, targetURLField]
+            .forEach { $0?.delegate = self }
 
         // Fix #41: configurable global shortcut — replaced static label with recorder.
         let shortcutLabel = NSTextField(labelWithString: "Global shortcut:")
@@ -226,6 +238,9 @@ class PreferencesWindowController: NSWindowController {
         testResultLabel.textColor = .secondaryLabelColor
         testResultLabel.frame = NSRect(x: 164, y: 22, width: 90, height: 16)
         content.addSubview(testResultLabel)
+
+        // Apply the initial dim/enable + Target URL swap for the saved mode.
+        modeChanged()
     }
 
     // MARK: - Notifications toggle (fix #28)
@@ -271,22 +286,6 @@ class PreferencesWindowController: NSWindowController {
     @objc func save() {
         let connectionMode = connectionModeSegment.selectedSegment == 0 ? "direct" : "ssh"
 
-        guard !targetURLField.stringValue.isEmpty else {
-            let alert = NSAlert()
-            alert.messageText = "Missing fields"
-            alert.informativeText = "Please fill in the Target URL."
-            alert.runModal()
-            return
-        }
-
-        guard let targetURL = URL(string: targetURLField.stringValue),
-            let scheme = targetURL.scheme?.lowercased(),
-            ["http", "https"].contains(scheme)
-        else {
-            showValidationError("Target URL must be a valid http:// or https:// URL.")
-            return
-        }
-
         if connectionMode == "ssh" {
             guard !usernameField.stringValue.isEmpty,
                 !hostField.stringValue.isEmpty,
@@ -297,6 +296,14 @@ class PreferencesWindowController: NSWindowController {
                 alert.messageText = "Missing SSH fields"
                 alert.informativeText = "Please fill in all SSH settings."
                 alert.runModal()
+                return
+            }
+
+            guard TunnelManager.isValidSSHIdentifier(usernameField.stringValue),
+                TunnelManager.isValidSSHIdentifier(hostField.stringValue)
+            else {
+                showValidationError(
+                    "Username and host may not start with \"-\" or contain spaces.")
                 return
             }
 
@@ -319,8 +326,52 @@ class PreferencesWindowController: NSWindowController {
             defaults.set(hostField.stringValue, forKey: "sshHost")
             defaults.set(String(localPort), forKey: "localPort")
             defaults.set(String(remotePort), forKey: "remotePort")
-            defaults.set(targetURL.absoluteString, forKey: "targetURL")
+            // targetURL intentionally untouched: SSH mode always loads the
+            // tunnel entrance (AppDelegate.effectiveTargetURL), and the stored
+            // value is kept for when the user switches back to Direct.
         } else {
+            guard !targetURLField.stringValue.isEmpty else {
+                let alert = NSAlert()
+                alert.messageText = "Missing fields"
+                alert.informativeText = "Please fill in the Target URL."
+                alert.runModal()
+                return
+            }
+
+            guard let targetURL = URL(string: targetURLField.stringValue),
+                let scheme = targetURL.scheme?.lowercased(),
+                ["http", "https"].contains(scheme)
+            else {
+                showValidationError("Target URL must be a valid http:// or https:// URL.")
+                return
+            }
+
+            // Plain http to a non-loopback host sends credentials and session
+            // data unencrypted — require a one-time acknowledgment per host.
+            // Loopback is exempt: nothing leaves the machine, and the SSH
+            // tunnel entrance must never prompt.
+            if scheme == "http",
+                let host = targetURL.host?.lowercased(),
+                !Self.isLoopbackHost(host),
+                !acknowledgedPlaintextHosts.contains(host)
+            {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Unencrypted connection"
+                alert.informativeText =
+                    "\"\(host)\" will be reached over plain HTTP — credentials, cookies, "
+                    + "and chat data will cross the network unencrypted.\n\n"
+                    + "Continue only if the path to the server is already protected "
+                    + "(Tailscale, VPN, trusted LAN). Otherwise use an https:// URL "
+                    + "or the SSH tunnel option.\n\n"
+                    + "You won't be asked again for this host."
+                alert.addButton(withTitle: "Use HTTP Anyway")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                UserDefaults.standard.set(
+                    acknowledgedPlaintextHosts + [host], forKey: Self.plaintextHostsKey)
+            }
+
             let defaults = UserDefaults.standard
             defaults.set(connectionMode, forKey: "connectionMode")
             defaults.set(targetURL.absoluteString, forKey: "targetURL")
@@ -336,7 +387,41 @@ class PreferencesWindowController: NSWindowController {
 
     @objc func modeChanged() {
         let isSSHMode = connectionModeSegment.selectedSegment == 1
-        sshViews.forEach { $0.isHidden = !isSSHMode }
+        // Dim rather than hide so the fixed-frame layout keeps its shape;
+        // disable inputs so a dimmed field can't take focus or edits.
+        sshViews.forEach { view in
+            view.alphaValue = isSSHMode ? 1.0 : 0.35
+            if let field = view as? NSTextField, field.isBezeled {
+                field.isEnabled = isSSHMode
+            }
+        }
+        targetURLField.isHidden = isSSHMode
+        tunnelURLLabel.isHidden = !isSSHMode
+        refreshTunnelURLLabel()
+        // A test result only describes the settings that were tested.
+        clearTestResult()
+    }
+
+    private func clearTestResult() {
+        testResultLabel.stringValue = ""
+        testResultLabel.toolTip = nil
+    }
+
+    private func refreshTunnelURLLabel() {
+        let port = Int(localPortField.stringValue) ?? 8787
+        tunnelURLLabel.stringValue = "http://127.0.0.1:\(port)  (via SSH tunnel)"
+    }
+
+    // MARK: - Plaintext-HTTP acknowledgment
+
+    private static let plaintextHostsKey = "plaintextAcknowledgedHosts"
+
+    private var acknowledgedPlaintextHosts: [String] {
+        UserDefaults.standard.stringArray(forKey: Self.plaintextHostsKey) ?? []
+    }
+
+    static func isLoopbackHost(_ host: String) -> Bool {
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
     private func showValidationError(_ message: String) {
@@ -347,11 +432,167 @@ class PreferencesWindowController: NSWindowController {
     }
 
     @objc func testConnection() {
+        let isSSHMode = connectionModeSegment.selectedSegment == 1
+
+        if isSSHMode {
+            // Hermes lives on the remote loopback — the only route to it is
+            // a tunnel. Stage 1 verifies auth with a real non-interactive
+            // login; stage 2 probes /health through the live tunnel when it
+            // matches these settings, otherwise through a temporary forward.
+            let host = hostField.stringValue
+            let user = usernameField.stringValue
+            guard TunnelManager.isValidSSHIdentifier(user),
+                TunnelManager.isValidSSHIdentifier(host)
+            else {
+                testResultLabel.stringValue = "Bad user/host"
+                testResultLabel.textColor = .systemRed
+                testResultLabel.toolTip =
+                    "Username and host must be non-empty and may not start "
+                    + "with \"-\" or contain spaces."
+                return
+            }
+            testResultLabel.stringValue = "Testing SSH…"
+            testResultLabel.textColor = .secondaryLabelColor
+            TunnelManager.testAuth(user: user, host: host) { [weak self] authResult in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    switch authResult {
+                    case .unreachable:
+                        self.testResultLabel.stringValue = "✗ No SSH"
+                        self.testResultLabel.textColor = .systemRed
+                        self.testResultLabel.toolTip =
+                            "No usable SSH session with \(host) — connection refused, "
+                            + "timed out, or host key problem."
+                        return
+                    case .authFailed:
+                        self.testResultLabel.stringValue = "✗ Auth failed"
+                        self.testResultLabel.textColor = .systemRed
+                        self.testResultLabel.toolTip =
+                            "\(host) speaks SSH but refused key auth for \"\(user)\". "
+                            + "The tunnel needs passwordless keys — set them up with: "
+                            + "ssh-copy-id \(user)@\(host)"
+                        return
+                    case .authenticated:
+                        break
+                    }
+                    // The live tunnel can only vouch for the fields when every
+                    // forward-shaping setting matches what it was built from.
+                    let defaults = UserDefaults.standard
+                    let tunnelUp =
+                        (NSApp.delegate as? AppDelegate)?.tunnelManager?.status == .connected
+                    let fieldPort = self.localPortField.stringValue
+                    guard tunnelUp,
+                        defaults.string(forKey: "connectionMode") == "ssh",
+                        defaults.string(forKey: "sshHost") == host,
+                        defaults.string(forKey: "sshUser") == user,
+                        defaults.string(forKey: "localPort") == fieldPort,
+                        defaults.string(forKey: "remotePort")
+                            == self.remotePortField.stringValue,
+                        let port = Int(fieldPort)
+                    else {
+                        // No matching live tunnel: verify end-to-end through
+                        // a temporary forward built from the field settings.
+                        guard let localPort = Int(fieldPort),
+                            (1...65535).contains(localPort),
+                            let remotePort = Int(self.remotePortField.stringValue),
+                            (1...65535).contains(remotePort)
+                        else {
+                            self.testResultLabel.stringValue = "✗ Bad port"
+                            self.testResultLabel.textColor = .systemRed
+                            self.testResultLabel.toolTip =
+                                "Ports must be numbers between 1 and 65535."
+                            return
+                        }
+                        // If the app's own live tunnel holds the configured
+                        // local port, test through an ephemeral port instead:
+                        // Save & Reconnect frees the real one by stopping the
+                        // old tunnel. A foreign process on the port still
+                        // reports "✗ Port busy" via testForward's pre-check.
+                        var testLocalPort = localPort
+                        if tunnelUp,
+                            defaults.string(forKey: "connectionMode") == "ssh",
+                            defaults.string(forKey: "localPort") == fieldPort,
+                            let ephemeral = TunnelManager.freeEphemeralPort()
+                        {
+                            testLocalPort = ephemeral
+                        }
+                        self.testResultLabel.stringValue = "Testing tunnel…"
+                        self.testResultLabel.textColor = .secondaryLabelColor
+                        TunnelManager.testForward(
+                            user: user, host: host,
+                            localPort: testLocalPort, remotePort: remotePort
+                        ) { forwardResult in
+                            DispatchQueue.main.async {
+                                switch forwardResult {
+                                case .healthy:
+                                    self.testResultLabel.stringValue = "✓ Hermes OK"
+                                    self.testResultLabel.textColor = .systemGreen
+                                    self.testResultLabel.toolTip =
+                                        "SSH auth, port forward, and /health all verified "
+                                        + "end-to-end with these settings (via a temporary "
+                                        + "tunnel, now closed)."
+                                case .reachableNoHealth:
+                                    self.testResultLabel.stringValue = "◐ No /health"
+                                    self.testResultLabel.textColor = .systemOrange
+                                    self.testResultLabel.toolTip =
+                                        "SSH auth and the forward work, but /health didn't "
+                                        + "verify through the tunnel — is hermes running on "
+                                        + "the remote at 127.0.0.1:\(remotePort)?"
+                                case .localPortBusy:
+                                    self.testResultLabel.stringValue = "✗ Port busy"
+                                    self.testResultLabel.textColor = .systemRed
+                                    self.testResultLabel.toolTip =
+                                        "Local port \(localPort) is already in use on this "
+                                        + "Mac — choose a different local port."
+                                case .forwardFailed:
+                                    self.testResultLabel.stringValue = "✗ No forward"
+                                    self.testResultLabel.textColor = .systemRed
+                                    self.testResultLabel.toolTip =
+                                        "SSH authenticated, but the port forward could not "
+                                        + "be established."
+                                }
+                            }
+                        }
+                        return
+                    }
+                    self.testResultLabel.stringValue = "Testing tunnel…"
+                    self.testResultLabel.textColor = .secondaryLabelColor
+                    ReachabilityProbe.probeHealth(
+                        urlString: "http://127.0.0.1:\(port)", timeout: 5
+                    ) { result in
+                        DispatchQueue.main.async {
+                            switch result {
+                            case .healthy:
+                                self.testResultLabel.stringValue = "✓ Hermes OK"
+                                self.testResultLabel.textColor = .systemGreen
+                                self.testResultLabel.toolTip =
+                                    "/health verified end-to-end through the running tunnel."
+                            case .reachable:
+                                self.testResultLabel.stringValue = "◐ No /health"
+                                self.testResultLabel.textColor = .systemOrange
+                                self.testResultLabel.toolTip =
+                                    "The tunnel entrance answers but /health didn't verify — "
+                                    + "is hermes running on the remote side?"
+                            case .unreachable:
+                                self.testResultLabel.stringValue = "✗ Tunnel dead"
+                                self.testResultLabel.textColor = .systemOrange
+                                self.testResultLabel.toolTip =
+                                    "SSH auth works, but nothing responded through the tunnel "
+                                    + "entrance on 127.0.0.1:\(port). The forward may have died — "
+                                    + "Save & Reconnect to rebuild it."
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         let urlString = targetURLField.stringValue.isEmpty
             ? (UserDefaults.standard.string(forKey: "targetURL") ?? "http://localhost:8787")
             : targetURLField.stringValue
 
-        guard let url = URL(string: urlString) else {
+        guard URL(string: urlString)?.host != nil else {
             testResultLabel.stringValue = "Invalid URL"
             testResultLabel.textColor = .systemRed
             return
@@ -360,29 +601,44 @@ class PreferencesWindowController: NSWindowController {
         testResultLabel.stringValue = "Testing…"
         testResultLabel.textColor = .secondaryLabelColor
 
-        // Use GET (not HEAD) because many dev servers return 405/501 for HEAD
-        // even when they serve GET normally. Treat any HTTPURLResponse as
-        // reachable regardless of status code — if TCP+HTTP completed a
-        // round-trip, the server is up. Only a network-level failure (no
-        // response) counts as "Unreachable".
-        var request = URLRequest(url: url, timeoutInterval: 5)
-        request.httpMethod = "GET"
-
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+        // Tri-state: /health verified · port open but /health unverified
+        // (reverse proxy up, hermes down — or not a hermes at all) · dead.
+        ReachabilityProbe.probeHealth(urlString: urlString, timeout: 5) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if response is HTTPURLResponse {
-                    self.testResultLabel.stringValue = "✓ Connected"
+                switch result {
+                case .healthy:
+                    self.testResultLabel.stringValue = "✓ Hermes OK"
                     self.testResultLabel.textColor = .systemGreen
-                } else {
+                    self.testResultLabel.toolTip = "/health answered — verified hermes server."
+                case .reachable:
+                    self.testResultLabel.stringValue = "◐ No /health"
+                    self.testResultLabel.textColor = .systemOrange
+                    self.testResultLabel.toolTip =
+                        "The port accepts connections but /health didn't verify — "
+                        + "possibly a reverse proxy in front of a stopped hermes, "
+                        + "or a different service on this port."
+                case .unreachable:
                     self.testResultLabel.stringValue = "✗ Unreachable"
                     self.testResultLabel.textColor = .systemRed
+                    self.testResultLabel.toolTip = "Nothing is accepting connections at this host/port."
                 }
             }
-        }.resume()
+        }
     }
 
     @objc func cancel() {
         close()
+    }
+}
+
+extension PreferencesWindowController: NSTextFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        // Any edit invalidates a previous Test Connection result.
+        clearTestResult()
+        // Keep the derived tunnel-URL label in sync while the local port is typed.
+        if (obj.object as? NSTextField) === localPortField {
+            refreshTunnelURLLabel()
+        }
     }
 }

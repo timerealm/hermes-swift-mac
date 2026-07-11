@@ -256,10 +256,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The URL browser windows actually load. In SSH mode this is always the
+    /// local tunnel entrance (http://127.0.0.1:<localPort>) — anything else
+    /// would connect straight to the remote host and bypass the ssh -L forward.
+    func effectiveTargetURL() -> String {
+        let defaults = UserDefaults.standard
+        let mode = defaults.string(forKey: "connectionMode") ?? "direct"
+        guard mode == "ssh" else {
+            return defaults.string(forKey: "targetURL") ?? defaultTargetURL
+        }
+        let localPort = Int(defaults.string(forKey: "localPort") ?? defaultLocalPort) ?? 8787
+        return "http://127.0.0.1:\(localPort)"
+    }
+
     func startTunnel() {
         let defaults = UserDefaults.standard
         let connectionMode = defaults.string(forKey: "connectionMode") ?? "direct"
-        let targetURL = defaults.string(forKey: "targetURL") ?? defaultTargetURL
+        let targetURL = effectiveTargetURL()
 
         let splashSubtitle = connectionMode == "ssh" ? "Establishing SSH tunnel…" : "Connecting…"
         splashWindow = SplashWindowController(title: appTitle, subtitle: splashSubtitle)
@@ -336,7 +349,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         } else {
-            preflightHTTP(urlString: targetURL) { reachable in
+            preflightReachability(urlString: targetURL) { reachable in
                 DispatchQueue.main.async {
                     self.splashWindow.close()
                     if reachable {
@@ -526,7 +539,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func openNewBrowserSession(asTab: Bool) {
         let defaults = UserDefaults.standard
         let mode = defaults.string(forKey: "connectionMode") ?? "direct"
-        let targetURL = defaults.string(forKey: "targetURL") ?? defaultTargetURL
+        let targetURL = effectiveTargetURL()
         if mode == "ssh" && tunnelManager?.status != .connected { return }
         if mode == "direct" && browserWindows.isEmpty {
             // No live first window in direct mode either — let startTunnel handle it.
@@ -573,22 +586,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setOfflineBadge(true)
     }
 
-    /// Verify the target URL answers HTTP before opening the main browser.
-    /// Any HTTPURLResponse (including 4xx/5xx) counts as reachable — we only
-    /// fail on transport errors (connection refused, reset, timeout).
-    private func preflightHTTP(
+    /// Verify something is listening at the target URL before opening the
+    /// main browser. Must use the ATS-free probe, not URLSession — ATS blocks
+    /// plain-http URLSession requests to non-loopback hosts that the WKWebView
+    /// (exempt via NSAllowsArbitraryLoadsInWebContent) can load fine.
+    /// Merely-reachable (port open, /health unverified) still opens the
+    /// browser: whatever the server actually serves — even a proxy error —
+    /// is better diagnostics than our generic error window.
+    private func preflightReachability(
         urlString: String, timeout: TimeInterval = 4.0,
         completion: @escaping (Bool) -> Void
     ) {
-        guard let url = URL(string: urlString) else {
-            completion(false)
-            return
+        ReachabilityProbe.probeHealth(urlString: urlString, timeout: timeout) { result in
+            completion(result != .unreachable)
         }
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.httpMethod = "GET"
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            completion(response is HTTPURLResponse)
-        }.resume()
     }
 
     // MARK: - Dock badge (fix #39)
@@ -831,8 +842,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Open in system browser (bonus feature)
 
     @objc func openInBrowser() {
-        let urlString = UserDefaults.standard.string(forKey: "targetURL") ?? "http://localhost:8787"
-        if let url = URL(string: urlString) {
+        // In SSH mode the reachable address is the tunnel entrance, not the
+        // remote host — same rule as the in-app browser.
+        if let url = URL(string: effectiveTargetURL()) {
             NSWorkspace.shared.open(url)
         }
     }

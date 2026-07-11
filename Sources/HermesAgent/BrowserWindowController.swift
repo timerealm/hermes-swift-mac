@@ -131,9 +131,10 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
     var isIntentionalClose = false
 
     // Health check timer for direct mode — polls /health every 30s and
-    // reflects status in the window title (fix #29).
+    // reflects status in the window title (fix #29). Tri-state: "port open
+    // but /health failing" (reverse proxy up, hermes down) is its own state.
     private var healthTimer: Timer?
-    private var isHealthy: Bool = true
+    private var healthState: HealthProbeResult = .healthy
 
     /// KVO observation for window.tabbedWindows. When AppKit adds or removes a
     /// tab from the group, the tab bar appears/disappears, which shifts the
@@ -704,7 +705,7 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
 
         // Start health polling for direct mode (fix #29)
         if connectionMode == "direct" {
-            updateWindowTitle(healthy: true)
+            updateWindowTitle()
             startHealthCheck()
         }
 
@@ -829,9 +830,8 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
     // MARK: Health check (direct mode, fix #29)
 
     private func startHealthCheck() {
-        let healthURL = urlString.hasSuffix("/") ? "\(urlString)health" : "\(urlString)/health"
         healthTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.pingHealth(urlString: healthURL)
+            self?.pingHealth()
         }
     }
 
@@ -840,24 +840,25 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         healthTimer = nil
     }
 
-    private func pingHealth(urlString: String) {
-        guard let url = URL(string: urlString) else { return }
-        var request = URLRequest(url: url, timeoutInterval: 5)
-        request.httpMethod = "GET"
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
-            let healthy = response is HTTPURLResponse
+    private func pingHealth() {
+        // Must be the ATS-free probe, not URLSession — ATS rejects plain-http
+        // to non-loopback hosts, which would pin remote direct-mode URLs
+        // (Tailscale/LAN) at "offline" regardless of actual server state.
+        ReachabilityProbe.probeHealth(urlString: urlString, timeout: 5) { [weak self] state in
             DispatchQueue.main.async {
-                guard let self = self, healthy != self.isHealthy else { return }
-                self.isHealthy = healthy
-                self.updateWindowTitle(healthy: healthy)
+                guard let self = self, state != self.healthState else { return }
+                self.healthState = state
+                self.updateWindowTitle()
             }
-        }.resume()
+        }
     }
 
-    private func updateWindowTitle(healthy: Bool) {
+    private func updateWindowTitle() {
         // Update Dock badge first so it stays accurate even when the tab title
-        // is fed from document.title (which doesn't carry health info).
-        (NSApp.delegate as? AppDelegate)?.setOfflineBadge(!healthy)
+        // is fed from document.title (which doesn't carry health info). The
+        // badge means "can't reach the server at all"; degraded /health only
+        // shows in the title dot.
+        (NSApp.delegate as? AppDelegate)?.setOfflineBadge(healthState == .unreachable)
         refreshTabTitle()
     }
 
@@ -886,7 +887,13 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
                 ? String(pageTitle.prefix(38)) + "…"
                 : pageTitle
         } else if connectionMode == "direct" {
-            let dot = isHealthy ? "●" : "○"
+            // ● /health verified · ◐ port answers, /health doesn't · ○ dead
+            let dot: String
+            switch healthState {
+            case .healthy: dot = "●"
+            case .reachable: dot = "◐"
+            case .unreachable: dot = "○"
+            }
             let host: String
             if let url = URL(string: urlString), let h = url.host {
                 let port = url.port.map { ":\($0)" } ?? ""
@@ -1162,6 +1169,10 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         download.delegate = self
     }
 
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
     // MARK: - File upload
 
     func webView(
@@ -1193,6 +1204,19 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
             return
         }
 
+        // An HTML download attribute becomes a navigation action before a
+        // response is available. Handle it before the generic API guard below;
+        // Hermes WebUI artifact links use /api/media and would otherwise be
+        // cancelled before WKWebView can create a WKDownload. file:// is
+        // excluded: a download-attributed file:// link must fall through to
+        // the scheme guard below and be cancelled, never become a WKDownload
+        // of a local file. blob:/data: stay eligible — they carry
+        // page-authored content, and JS-generated exports rely on them.
+        if navigationAction.shouldPerformDownload, url.scheme?.lowercased() != "file" {
+            decisionHandler(.download)
+            return
+        }
+
         // Defense-in-depth (#76): API endpoints should never become full-page
         // navigations. The WebUI's JS treats /api/* as fetch targets only, and
         // every API error response uses the JSON shape `{"error": "..."}` —
@@ -1204,8 +1228,11 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         // chance to retry the action. Companion WebUI-side fix at
         // nesquena/hermes-webui#1835 locks down the home route to never
         // return JSON; this Mac-side guard catches every other class of
-        // accidental API navigation regardless of WebUI state.
-        if url.path.hasPrefix("/api/") {
+        // accidental API navigation regardless of WebUI state. The explicit
+        // artifact endpoints remain eligible for response-time download
+        // detection via Content-Disposition.
+        let downloadAPIPaths = ["/api/media", "/api/file/raw", "/api/folder/download"]
+        if url.path.hasPrefix("/api/") && !downloadAPIPaths.contains(url.path) {
             decisionHandler(.cancel)
             return
         }
