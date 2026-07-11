@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **SSH mode no longer bypasses the tunnel** — the browser loaded the raw Target URL instead of the tunnel entrance, so the `ssh -L` forward came up but carried no traffic (`netstat` showed a direct connection to the remote host). `AppDelegate.effectiveTargetURL()` now returns `http://127.0.0.1:<local port>` in SSH mode and the Target URL in Direct mode, applied to launch/reconnect, new windows/tabs, and View → Open in Browser.
+- **Direct mode works with non-localhost URLs (Tailscale/LAN hosts)** — a Target URL like `http://my-box.ts.net:8787` failed with "Cannot connect" even when the server was up: the WKWebView is ATS-exempt (`NSAllowsArbitraryLoadsInWebContent`) but the URLSession preflight, Test Connection, and health ping were not, so ATS rejected their plain-http requests to non-loopback hosts with -1022. All three now use `ReachabilityProbe`, which speaks HTTP over Network.framework (not subject to ATS).
+
+### Added
+- **Tri-state `/health` verification** — the probe issues a real `GET /health` (hand-rolled over NWConnection, TLS for https) rather than just connecting, so it can tell a healthy hermes (2xx + `"status": "ok"`) from a reverse proxy answering for a dead backend (reachable) from nothing listening (unreachable). Surfaced in Test Connection and the direct-mode title dot (● / ◐ / ○); the Dock "!" badge fires only on unreachable.
+- **End-to-end SSH Test Connection** — verifies a real non-interactive login (`ssh -o BatchMode=yes user@host exit`), distinguishing "✗ No SSH" from "✗ Auth failed" (keys refused → `ssh-copy-id` hint). On success it confirms hermes end-to-end: through the live tunnel when every forward-shaping setting matches, otherwise via a temporary `ssh -N -L` built from the fields and torn down after probing — so "✓ Hermes OK" means auth + forward + verified hermes. Reports "✗ Port busy" when the local port is taken (bind pre-check) and clears a stale result when any field or the mode changes.
+- **Preferences: Tunnel selector** — the mode segment is now "Tunnel: None | SSH" (persisted values unchanged); the SSH sections dim/disable instead of hiding, and in SSH mode the Target URL row becomes a read-only derived tunnel-entrance label.
+- **Plaintext-HTTP acknowledgment** — saving a Direct `http://` URL to a non-loopback host prompts a one-time per-host warning that credentials and session data cross the network unencrypted. Loopback is exempt.
+
+### Security
+- SSH username/host fields reject values that could smuggle ssh options (leading `-`, whitespace), enforced at Save, Test Connection, and in `testAuth`/`testForward`. The health probe builds its request from the percent-encoded URL path so encoded CR/LF can't reshape the request.
+
 ## [v1.7.0] — 2026-05-07
 
 ### Added
