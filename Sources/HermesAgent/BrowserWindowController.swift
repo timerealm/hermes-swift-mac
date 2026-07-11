@@ -1207,8 +1207,12 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         // An HTML download attribute becomes a navigation action before a
         // response is available. Handle it before the generic API guard below;
         // Hermes WebUI artifact links use /api/media and would otherwise be
-        // cancelled before WKWebView can create a WKDownload.
-        if navigationAction.shouldPerformDownload {
+        // cancelled before WKWebView can create a WKDownload. file:// is
+        // excluded: a download-attributed file:// link must fall through to
+        // the scheme guard below and be cancelled, never become a WKDownload
+        // of a local file. blob:/data: stay eligible — they carry
+        // page-authored content, and JS-generated exports rely on them.
+        if navigationAction.shouldPerformDownload, url.scheme?.lowercased() != "file" {
             decisionHandler(.download)
             return
         }

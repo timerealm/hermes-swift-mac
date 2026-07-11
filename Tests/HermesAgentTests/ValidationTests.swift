@@ -548,9 +548,28 @@ final class APINavigationGuardTests: XCTestCase {
     // Mirrors BrowserWindowController.webView(_:decidePolicyFor:) check
     func shouldCancelAsAPINav(_ urlString: String, shouldPerformDownload: Bool = false) -> Bool {
         guard let url = URL(string: urlString) else { return false }
-        if shouldPerformDownload { return false }
+        if shouldPerformDownload && url.scheme?.lowercased() != "file" { return false }
         let downloadAPIPaths = ["/api/media", "/api/file/raw", "/api/folder/download"]
         return url.path.hasPrefix("/api/") && !downloadAPIPaths.contains(url.path)
+    }
+
+    // Mirrors the download fast-path's file:// exclusion: a download-attributed
+    // file:// link gets no WKDownload — it falls through to the scheme guard
+    // that cancels all file:// navigation.
+    func downloadFastPathApplies(_ urlString: String, shouldPerformDownload: Bool) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        return shouldPerformDownload && url.scheme?.lowercased() != "file"
+    }
+
+    func testDownloadFastPathExcludesFileScheme() {
+        XCTAssertTrue(downloadFastPathApplies(
+            "http://localhost:8787/api/media", shouldPerformDownload: true))
+        XCTAssertTrue(downloadFastPathApplies(
+            "blob:http://localhost:8787/some-uuid", shouldPerformDownload: true))
+        XCTAssertFalse(downloadFastPathApplies(
+            "file:///etc/passwd", shouldPerformDownload: true))
+        XCTAssertFalse(downloadFastPathApplies(
+            "http://localhost:8787/api/media", shouldPerformDownload: false))
     }
 
     func testApiPathsAreCancelled() {
