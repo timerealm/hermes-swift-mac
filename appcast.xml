@@ -7,6 +7,21 @@
         <language>en</language>
 
         <item>
+            <title>Version 1.7.3</title>
+            <pubDate>Sat, 18 Jul 2026 19:25:54 +0000</pubDate>
+            <sparkle:version>1.7.3</sparkle:version>
+            <sparkle:shortVersionString>1.7.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/hermes-webui/hermes-swift-mac/releases/tag/v1.7.3</sparkle:releaseNotesLink>
+            <enclosure
+                url="https://github.com/hermes-webui/hermes-swift-mac/releases/download/v1.7.3/Hermes-Agent-v1.7.3.dmg"
+                sparkle:edSignature="3SgWVyjHiAvs61KUPiNW9Rq0h3TZkKlVLA/hJOIQp/lzRNbYNe8w6eiYzct5yRT/HAsK6+ycfIna1LQRByPQCQ=="
+                length="2295557"
+                type="application/octet-stream"/>
+        </item>
+
+
+        <item>
             <title>Version 1.7.2</title>
             <pubDate>Sat, 11 Jul 2026 23:20:41 +0000</pubDate>
             <sparkle:version>1.7.2</sparkle:version>
