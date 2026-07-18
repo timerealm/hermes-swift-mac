@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.7.3] — 2026-07-18
+
+### Fixed
+- **Escape no longer hides the window — PR #93** — pressing Escape with the find bar closed could make the entire window vanish (the last-window close path hides via `orderOut` rather than closing, so the whole app seemed to disappear). Root cause: `cancelOperation(_:)` called `super.cancelOperation` on the no-find-bar path, but that NSResponder key-binding method is declared without an implementation — every bare Escape threw an unrecognized-selector exception inside WebKit's command dispatch (`executeSavedCommandBySelector`), caught by AppKit's event-loop guard but leaving dispatch in an undefined state that could bubble into `performClose`. Escape is now swallowed when the find bar is closed; Escape-closes-find-bar behavior is unchanged. Contributed by @roryford.
+
 ## [v1.7.2] — 2026-07-11
 
 ### Fixed
