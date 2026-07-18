@@ -1535,14 +1535,12 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         window?.makeFirstResponder(webView)
     }
 
-    // cancelOperation is sent by AppKit when the user presses Escape while
-    // the find field is first responder. Closing the bar here satisfies the
-    // CHANGELOG claim that Escape dismisses the bar.
+    // cancelOperation is sent by AppKit when the user presses Escape.
+    // Only act when the find bar is open — swallow it otherwise so Escape
+    // doesn't bubble up to NSWindow.performClose and hide the window.
     override func cancelOperation(_ sender: Any?) {
         if findBarVisible {
             hideFindBar()
-        } else {
-            super.cancelOperation(sender)
         }
     }
 
