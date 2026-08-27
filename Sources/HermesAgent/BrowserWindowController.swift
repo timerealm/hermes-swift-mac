@@ -101,6 +101,10 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
     /// Guards against onNavigationFailed firing twice (both provisional and 5xx paths
     /// can trigger on the same load event during teardown).
     private var didReportNavigationFailure = false
+    /// Last URL re-issued to attach custom headers. Belt-and-braces against a
+    /// re-issue loop if WebKit ever drops a header we asked for: we re-issue a
+    /// given URL at most once in a row. See `customHeaderReissue(for:)`.
+    private var lastCustomHeaderReissue: URL?
     /// Tracks whether the first navigation paint has occurred, so the fade-in
     /// animation (fix #52) only fires once — not on every SPA route change.
     private var hasCompletedFirstPaint = false
@@ -700,7 +704,7 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         }
 
         if let url = URL(string: urlString) {
-            webView.load(URLRequest(url: url))
+            webView.load(CustomHeaderStore.request(for: url))
         }
 
         // Start health polling for direct mode (fix #29)
@@ -1238,6 +1242,7 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         }
 
         let scheme = url.scheme?.lowercased() ?? ""
+        let configuredURL = UserDefaults.standard.string(forKey: "targetURL") ?? ""
 
         // Block file:// entirely
         if scheme == "file" {
@@ -1252,26 +1257,79 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         }
 
         let host = url.host?.lowercased() ?? ""
+        let configuredHost = URL(string: configuredURL)?.host?.lowercased() ?? ""
+        let isConfiguredHost = !configuredHost.isEmpty && host == configuredHost
 
-        // Allow localhost and loopback
-        if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-            decisionHandler(.allow)
-            return
-        }
-
-        // Allow navigation to the configured remote host (SSH mode)
-        let configuredURL = UserDefaults.standard.string(forKey: "targetURL") ?? ""
-        if let configuredHost = URL(string: configuredURL)?.host?.lowercased(),
-            !configuredHost.isEmpty,
-            host == configuredHost
-        {
-            decisionHandler(.allow)
+        // Allow loopback and the configured remote host (SSH mode). Both may
+        // need the user's custom headers attached, which cannot be done to a
+        // navigation already in flight — only by re-issuing it.
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" || isConfiguredHost {
+            if let decorated = customHeaderReissue(for: navigationAction) {
+                decisionHandler(.cancel)
+                // Load after the policy decision has been delivered — starting
+                // a new load from inside the decision handler is not supported.
+                DispatchQueue.main.async { [weak self] in
+                    self?.webView.load(decorated)
+                }
+            } else {
+                decisionHandler(.allow)
+            }
             return
         }
 
         // Everything else opens in Safari
         NSWorkspace.shared.open(url)
         decisionHandler(.cancel)
+    }
+
+    // MARK: - Custom request headers
+
+    /// Re-issue a main-frame navigation with the user's custom headers
+    /// attached, for edge authenticators (Cloudflare Access service tokens, an
+    /// auth-proxy shared secret) that gate the server. Returns the decorated
+    /// request when the navigation should be taken over — the caller cancels the
+    /// original and loads this one — or nil to let the navigation proceed.
+    ///
+    /// Re-issuing is the only supported way to put headers on a WKWebView load:
+    /// the request handed to this delegate is immutable, and `URLProtocol` never
+    /// sees WebView traffic at all (it runs in WebKit's networking process).
+    /// See `CustomHeaderStore` for why that is enough — the edge authenticator
+    /// answers this navigation with a session cookie, which WKWebView then
+    /// replays on subresources, fetches, and WebSockets by itself.
+    ///
+    /// Scoped to main-frame GETs. A POST would lose its body (`httpBody` is not
+    /// populated on a navigation action), and subframes are cookie-covered by
+    /// the time they load.
+    private func customHeaderReissue(for navigationAction: WKNavigationAction) -> URLRequest? {
+        guard let url = navigationAction.request.url,
+            navigationAction.targetFrame?.isMainFrame == true,
+            (navigationAction.request.httpMethod ?? "GET").uppercased() == "GET"
+        else { return nil }
+
+        let headers = CustomHeaderStore.headers(for: url)
+        guard !headers.isEmpty else { return nil }
+
+        // Our own decorated request coming back through the delegate: let it
+        // through, and clear the marker so a later return to this URL (back
+        // button, reconnect) is decorated again.
+        if CustomHeaderStore.requestCarries(headers, navigationAction.request) {
+            lastCustomHeaderReissue = nil
+            return nil
+        }
+        // Already re-issued this exact URL and the headers still aren't on it —
+        // WebKit dropped them. Let the undecorated load proceed rather than
+        // bounce the navigation forever.
+        guard lastCustomHeaderReissue != url else {
+            lastCustomHeaderReissue = nil
+            return nil
+        }
+
+        lastCustomHeaderReissue = url
+        var request = navigationAction.request
+        for header in headers {
+            request.setValue(header.value, forHTTPHeaderField: header.name)
+        }
+        return request
     }
 
     // MARK: - Window close / hide (Cmd+W hides, doesn't quit)
@@ -1436,7 +1494,7 @@ class BrowserWindowController: NSWindowController, NSWindowDelegate, WKUIDelegat
         } else {
             urlString = newURLString
             if let url = URL(string: newURLString) {
-                webView.load(URLRequest(url: url))
+                webView.load(CustomHeaderStore.request(for: url))
             }
         }
     }

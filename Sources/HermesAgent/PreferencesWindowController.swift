@@ -23,10 +23,13 @@ class PreferencesWindowController: NSWindowController {
     private var pendingHotkeyKeyCode: UInt32?
     private var pendingHotkeyModifiers: UInt32?
     private var pendingHotkeyEnabled: Bool?
+    /// Editor for custom HTTP request headers (Cloudflare Access service
+    /// tokens and similar edge-auth credentials), one `Name: Value` per line.
+    private var headersTextView: NSTextView!
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 628),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 798),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -47,7 +50,7 @@ class PreferencesWindowController: NSWindowController {
         let content = window!.contentView!
         // Starting y must shift with the window height bump; otherwise the new
         // Notifications row pushes launchAtLogin into the Save/Cancel buttons.
-        var y: CGFloat = 568
+        var y: CGFloat = 738
 
         func sectionHeader(_ text: String) -> NSTextField {
             let label = NSTextField(labelWithString: text)
@@ -152,6 +155,60 @@ class PreferencesWindowController: NSWindowController {
         // Connection result; the local port also drives the tunnel-URL label.
         [usernameField, hostField, localPortField, remotePortField, targetURLField]
             .forEach { $0?.delegate = self }
+
+        // ── Custom request headers ──
+        // Applies to both tunnel modes, so it is not registered in sshViews.
+        _ = divider()
+        _ = sectionHeader("CUSTOM HEADERS")
+
+        let headersLabel = NSTextField(labelWithString: "Headers:")
+        headersLabel.font = NSFont.systemFont(ofSize: 13)
+        headersLabel.frame = NSRect(x: 24, y: y - 4, width: 130, height: 22)
+        headersLabel.alignment = .right
+        content.addSubview(headersLabel)
+
+        let headersScrollView = NSScrollView(frame: NSRect(x: 164, y: y - 66, width: 300, height: 88))
+        headersScrollView.hasVerticalScroller = true
+        headersScrollView.hasHorizontalScroller = false
+        headersScrollView.autohidesScrollers = true
+        headersScrollView.borderType = .bezelBorder
+        headersScrollView.drawsBackground = true
+
+        let contentSize = headersScrollView.contentSize
+        headersTextView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height))
+        headersTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        headersTextView.isRichText = false
+        headersTextView.isAutomaticQuoteSubstitutionEnabled = false
+        headersTextView.isAutomaticDashSubstitutionEnabled = false
+        headersTextView.isAutomaticSpellingCorrectionEnabled = false
+        // Without these the text view neither grows with its content nor
+        // scrolls — text past the visible box is simply unreachable.
+        headersTextView.minSize = NSSize(width: 0, height: contentSize.height)
+        headersTextView.maxSize = NSSize(width: .greatestFiniteMagnitude,
+                                         height: .greatestFiniteMagnitude)
+        headersTextView.isVerticallyResizable = true
+        headersTextView.isHorizontallyResizable = false
+        headersTextView.autoresizingMask = [.width]
+        headersTextView.textContainer?.containerSize = NSSize(
+            width: contentSize.width, height: .greatestFiniteMagnitude)
+        headersTextView.textContainer?.widthTracksTextView = true
+        headersTextView.string = CustomHeaderStore.serialize(CustomHeaderStore.load())
+        headersScrollView.documentView = headersTextView
+        content.addSubview(headersScrollView)
+        y -= 70
+
+        let headersNote = NSTextField(wrappingLabelWithString:
+            "One per line, e.g. \"CF-Access-Client-Id: abc123.access\". Sent only on "
+            + "page loads of the target host over HTTPS (loopback may use HTTP); the "
+            + "session cookie the server returns covers everything after that. Values "
+            + "are stored in your login Keychain, not in preferences.")
+        headersNote.preferredMaxLayoutWidth = 300
+        headersNote.font = NSFont.systemFont(ofSize: 10)
+        headersNote.textColor = .tertiaryLabelColor
+        headersNote.frame = NSRect(x: 164, y: y - 48, width: 300, height: 48)
+        content.addSubview(headersNote)
+        y -= 52
 
         // Fix #41: configurable global shortcut — replaced static label with recorder.
         let shortcutLabel = NSTextField(labelWithString: "Global shortcut:")
@@ -375,6 +432,17 @@ class PreferencesWindowController: NSWindowController {
             let defaults = UserDefaults.standard
             defaults.set(connectionMode, forKey: "connectionMode")
             defaults.set(targetURL.absoluteString, forKey: "targetURL")
+        }
+
+        // Custom headers. A malformed line is reported rather than dropped —
+        // a typo'd auth header is the difference between reaching hermes and
+        // staring at the identity provider's login page.
+        switch CustomHeaderStore.parse(headersTextView.string) {
+        case .failure(let error):
+            showValidationError(error.message)
+            return
+        case .success(let headers):
+            CustomHeaderStore.save(headers)
         }
 
         // Fix #41: persist pending hotkey edits if any (defer model prevents Cancel wiping them)
@@ -601,9 +669,26 @@ class PreferencesWindowController: NSWindowController {
         testResultLabel.stringValue = "Testing…"
         testResultLabel.textColor = .secondaryLabelColor
 
+        // Test what is on screen, not what was last saved: behind Cloudflare
+        // Access an unauthenticated /health returns the login page, which
+        // would read as "◐ No /health" and send the user hunting a problem
+        // that isn't there. A malformed editor line probes with no headers —
+        // Save is where it gets reported.
+        let liveHeaders: [CustomHeaderStore.Header]
+        if let url = URL(string: urlString),
+            case .success(let parsed) = CustomHeaderStore.parse(headersTextView.string)
+        {
+            liveHeaders = CustomHeaderStore.headers(
+                parsed, for: url, configuredTargetURL: urlString)
+        } else {
+            liveHeaders = []
+        }
+
         // Tri-state: /health verified · port open but /health unverified
         // (reverse proxy up, hermes down — or not a hermes at all) · dead.
-        ReachabilityProbe.probeHealth(urlString: urlString, timeout: 5) { [weak self] result in
+        ReachabilityProbe.probeHealth(
+            urlString: urlString, timeout: 5, headers: liveHeaders
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch result {

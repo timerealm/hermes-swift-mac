@@ -29,8 +29,13 @@ enum ReachabilityProbe {
 
     /// Probe an http(s) URL's `/health` endpoint. Completion fires exactly
     /// once, on an arbitrary queue — callers hop to main themselves.
+    /// `headers` overrides the stored custom headers — Preferences passes the
+    /// unsaved editor contents so Test Connection reflects what is on screen.
+    /// The caller is responsible for having run them through
+    /// `CustomHeaderStore.headers(_:for:configuredTargetURL:)` first.
     static func probeHealth(
         urlString: String, timeout: TimeInterval = 4.0,
+        headers: [CustomHeaderStore.Header]? = nil,
         completion: @escaping (HealthProbeResult) -> Void
     ) {
         guard let url = URL(string: urlString),
@@ -84,9 +89,19 @@ enum ReachabilityProbe {
                 let path = base.isEmpty || base == "/"
                     ? "/health"
                     : (base.hasSuffix("/") ? base + "health" : base + "/health")
+                // The user's edge-auth headers (Cloudflare Access service
+                // token and the like), or /health answers with the identity
+                // provider's login page and the probe reports "reachable but
+                // not hermes". Header names and values are validated at Save
+                // to contain no CR/LF, which is what keeps them from
+                // reshaping this hand-rolled request.
+                let extra = (headers ?? CustomHeaderStore.headers(for: url))
+                    .map { "\($0.name): \($0.value)\r\n" }
+                    .joined()
                 let request = "GET \(path) HTTP/1.1\r\n"
                     + "Host: \(host)\r\n"
                     + "Accept: application/json\r\n"
+                    + extra
                     + "Connection: close\r\n\r\n"
                 connection.send(
                     content: request.data(using: .utf8),
