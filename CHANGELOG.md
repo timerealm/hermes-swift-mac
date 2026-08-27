@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Custom request headers for edge-authenticated servers — PR #100** — a `CUSTOM HEADERS` section in Preferences takes `Name: Value` pairs (one per line) that are attached to page loads of the target host, so a hermes behind Cloudflare Access can be reached with a service token (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) instead of a browser OTP round-trip. Any reverse proxy that authenticates on a header works the same way. Headers are attached to **main-frame GET navigations** — the initial load, reconnects, redirects, and in-app links — by cancelling the navigation in `decidePolicyFor navigationAction` and re-issuing it decorated; the request WebKit hands the delegate is immutable, so re-issuing is the only supported way to add a header to a `WKWebView` load. Sub-resources, `fetch`, and WebSockets are not decorated and do not need to be: Cloudflare Access answers the first authenticated navigation with a `CF_Authorization` cookie, which `WKWebView` then replays on everything else itself. `ReachabilityProbe` sends the same headers on its `GET /health`, so Test Connection and the direct-mode title dot report ● rather than ◐ from behind the gateway.
+  - Not `URLProtocol`: `WKWebView` loads run in WebKit's networking process, so a protocol registered with `URLProtocol.registerClass` never observes a single WebView request (the `WKBrowsingContextController` SPI that would change that does not cover `https` at all).
+
+### Security
+- Header values are bearer secrets and are stored in the login Keychain, one generic-password item per header name; only the names and their order live in `UserDefaults`. Removing a header deletes its Keychain item. (Local builds are ad-hoc signed, so their code identity changes every rebuild and macOS re-prompts for access to items an earlier build created; signed releases prompt once.)
+- Headers are sent **only** to the configured target host or to loopback, and **only** over HTTPS unless the host is loopback — following an off-site link in the app cannot hand the service token to a third party, and a token is never put on the wire in plaintext to a remote host.
+- Header names are restricted to the RFC 7230 `token` set and values to visible ASCII plus tab, so neither can carry the CR/LF that would let a configured header inject a second request into `ReachabilityProbe`'s hand-rolled HTTP. Names WebKit owns (`Host`, `Cookie`, `Content-Length`, `User-Agent`, …) are rejected at Save rather than silently dropped at load time. A malformed line fails the Save with its line number instead of being skipped — a typo'd auth header otherwise looks exactly like a server that is down.
+
 ## [v1.7.3] — 2026-07-18
 
 ### Fixed
