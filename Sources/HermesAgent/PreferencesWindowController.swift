@@ -23,10 +23,8 @@ class PreferencesWindowController: NSWindowController {
     private var pendingHotkeyKeyCode: UInt32?
     private var pendingHotkeyModifiers: UInt32?
     private var pendingHotkeyEnabled: Bool?
-    /// Multi-line text view for custom HTTP headers (e.g. Cloudflare Access service token headers).
-    private var headersTextView: NSTextView!
-    /// Number of header rows visible; content taller than this gets a scrollbar.
-    private let headersVisibleLines: CGFloat = 3
+/// Multi-line text view for custom HTTP headers (e.g. Cloudflare Access service token headers).
+private var headersTextView: NSTextView!
 
     init() {
         let window = NSWindow(
